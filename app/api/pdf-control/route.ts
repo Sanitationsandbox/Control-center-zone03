@@ -1,54 +1,7 @@
-import {
-  isPdfDirection,
-  isPdfId,
-  mediaDocuments,
-  type PdfControlState,
-  type PdfRemoteState,
-} from "@/lib/pdf-control";
+import { prisma } from "@/lib/prisma";
+import { isPdfDirection, isPdfId, type PdfId } from "@/lib/pdf-control";
 
 export const dynamic = "force-dynamic";
-
-const globalState = globalThis as typeof globalThis & {
-  pdfRemoteState?: PdfRemoteState;
-};
-
-function createInitialState(): PdfControlState {
-  return Object.fromEntries(
-    mediaDocuments.map((document) => [
-      document.id,
-      {
-        page: 1,
-        totalPages:
-          document.kind === "images" ? document.images.length : null,
-        updatedAt: Date.now(),
-      },
-    ]),
-  ) as PdfControlState;
-}
-
-const state = (globalState.pdfRemoteState ??= {
-  activePdfId: null,
-  videoPlaying: false,
-  documents: createInitialState(),
-});
-
-state.videoPlaying ??= false;
-
-for (const document of mediaDocuments) {
-  state.documents[document.id] ??= {
-    page: 1,
-    totalPages: document.kind === "images" ? document.images.length : null,
-    updatedAt: Date.now(),
-  };
-
-  if (document.kind === "images") {
-    state.documents[document.id].totalPages = document.images.length;
-    state.documents[document.id].page = Math.min(
-      state.documents[document.id].page,
-      document.images.length,
-    );
-  }
-}
 
 function json(data: unknown, status = 200) {
   return Response.json(data, {
@@ -57,8 +10,35 @@ function json(data: unknown, status = 200) {
   });
 }
 
+async function loadState() {
+  const pipelines = await prisma.pipeline.findMany({
+    include: { slides: { include: { asset: true }, orderBy: { position: "asc" } } },
+    orderBy: { position: "asc" },
+  });
+
+  const documents = Object.fromEntries(
+    pipelines.map((pipeline) => [
+      pipeline.legacyPdfId,
+      {
+        page: pipeline.pdfPage,
+        totalPages: pipeline.slides.length,
+        updatedAt: pipeline.updatedAt.getTime(),
+        images: pipeline.slides.map((slide) => slide.asset.url),
+      },
+    ])
+  );
+
+  const live = pipelines.find((pipeline) => pipeline.live);
+
+  return {
+    activePdfId: (live?.legacyPdfId ?? null) as PdfId | null,
+    videoPlaying: live?.videoPlaying ?? false,
+    documents,
+  };
+}
+
 export async function GET() {
-  return json(state);
+  return json(await loadState());
 }
 
 export async function POST(request: Request) {
@@ -74,15 +54,19 @@ export async function POST(request: Request) {
   }
 
   if (body.action === "clear") {
-    state.activePdfId = null;
-    state.videoPlaying = false;
-    return json(state);
+    await prisma.pipeline.updateMany({ data: { live: false, videoPlaying: false } });
+    return json(await loadState());
   }
 
   if (body.action === "activate" && isPdfId(body.pdfId)) {
-    state.activePdfId = body.pdfId;
-    state.videoPlaying = false;
-    return json(state);
+    await prisma.$transaction([
+      prisma.pipeline.updateMany({ data: { live: false } }),
+      prisma.pipeline.update({
+        where: { legacyPdfId: body.pdfId },
+        data: { live: true, videoPlaying: false },
+      }),
+    ]);
+    return json(await loadState());
   }
 
   if (
@@ -93,37 +77,34 @@ export async function POST(request: Request) {
     return json({ error: "Invalid PDF command" }, 400);
   }
 
-  const document = state.documents[body.pdfId];
-  const lastPage = document.totalPages ?? Number.MAX_SAFE_INTEGER;
+  const pipeline = await prisma.pipeline.findUniqueOrThrow({
+    where: { legacyPdfId: body.pdfId },
+    include: { _count: { select: { slides: true } } },
+  });
+
+  const lastPage = pipeline._count.slides || 1;
   const nextPage =
-    body.direction === "next" ? document.page + 1 : document.page - 1;
+    body.direction === "next" ? pipeline.pdfPage + 1 : pipeline.pdfPage - 1;
+  const page = Math.min(lastPage, Math.max(1, nextPage));
 
-  document.page = Math.min(lastPage, Math.max(1, nextPage));
-  document.updatedAt = Date.now();
+  const updated = await prisma.pipeline.update({
+    where: { legacyPdfId: body.pdfId },
+    data: { pdfPage: page },
+  });
 
-  return json({ pdfId: body.pdfId, document });
+  return json({
+    pdfId: body.pdfId,
+    document: {
+      page: updated.pdfPage,
+      totalPages: lastPage,
+      updatedAt: updated.updatedAt.getTime(),
+    },
+  });
 }
 
-export async function PATCH(request: Request) {
-  const body = (await request.json().catch(() => null)) as {
-    pdfId?: unknown;
-    totalPages?: unknown;
-  } | null;
-
-  if (
-    !body ||
-    !isPdfId(body.pdfId) ||
-    typeof body.totalPages !== "number" ||
-    !Number.isInteger(body.totalPages) ||
-    body.totalPages < 1
-  ) {
-    return json({ error: "Invalid PDF page count" }, 400);
-  }
-
-  const document = state.documents[body.pdfId];
-  document.totalPages = body.totalPages;
-  document.page = Math.min(document.page, body.totalPages);
-  document.updatedAt = Date.now();
-
-  return json({ pdfId: body.pdfId, document });
+export async function PATCH() {
+  return json(
+    { error: "totalPages is now derived from the pipeline's slide count and can no longer be set directly" },
+    410
+  );
 }

@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { mediaDocuments, type PdfRemoteState } from "@/lib/pdf-control";
+import { type PdfRemoteState } from "@/lib/pdf-control";
 import { ImageViewer } from "../preview/components/ImageViewer";
 import styles from "../preview/preview.module.css";
 
 export default function PreviewCrtPage() {
   const [page, setPage] = useState(1);
+  const [images, setImages] = useState<string[]>([]);
 
   useEffect(() => {
     async function syncState() {
@@ -15,6 +16,7 @@ export default function PreviewCrtPage() {
         if (response.ok) {
           const data = (await response.json()) as PdfRemoteState;
           setPage(data.documents["pdf-1"].page);
+          setImages(data.documents["pdf-1"].images);
         }
       } catch {
         // Ignore API offline errors silently
@@ -29,16 +31,10 @@ export default function PreviewCrtPage() {
     };
   }, []);
 
-  const crtDocument = mediaDocuments.find((doc) => doc.id === "pdf-1");
-
   return (
     <main className={styles.wall}>
-      {crtDocument && (
-        <ImageViewer
-          images={crtDocument.images}
-          pageNumber={page}
-          label="pdf-1"
-        />
+      {images.length > 0 && (
+        <ImageViewer images={images} pageNumber={page} label="pdf-1" />
       )}
     </main>
   );

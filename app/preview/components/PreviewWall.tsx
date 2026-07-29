@@ -1,22 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  mediaDocuments,
-  type PdfRemoteState,
-  type PdfId,
-} from "@/lib/pdf-control";
+import { mediaDocuments, type PdfRemoteState, type PdfId } from "@/lib/pdf-control";
 import styles from "../preview.module.css";
 import { ImageViewer } from "./ImageViewer";
 
+const pdfIds = mediaDocuments.map((document) => document.id);
+
 const initialPages = Object.fromEntries(
-  mediaDocuments.map((document) => [document.id, 1]),
+  pdfIds.map((id) => [id, 1]),
 ) as Record<PdfId, number>;
+
+const initialImages = Object.fromEntries(
+  pdfIds.map((id) => [id, [] as string[]]),
+) as Record<PdfId, string[]>;
 
 export function PreviewWall() {
   const [pages, setPages] = useState(initialPages);
+  const [images, setImages] = useState(initialImages);
   const [activePdfId, setActivePdfId] = useState<PdfId | null>(null);
-  const [videoPlaying, setVideoPlaying] = useState(false);
 
   const refreshPages = useCallback(async () => {
     try {
@@ -25,23 +27,20 @@ export function PreviewWall() {
 
       const data = (await response.json()) as PdfRemoteState;
       setActivePdfId(data.activePdfId);
-      setVideoPlaying(data.videoPlaying);
       setPages(
         Object.fromEntries(
-          mediaDocuments.map((document) => [
-            document.id,
-            data.documents[document.id].page,
-          ]),
+          pdfIds.map((id) => [id, data.documents[id].page]),
         ) as Record<PdfId, number>,
+      );
+      setImages(
+        Object.fromEntries(
+          pdfIds.map((id) => [id, data.documents[id].images]),
+        ) as Record<PdfId, string[]>,
       );
     } catch {
       // Ignore API offline errors silently
     }
   }, []);
-
-  const activeDocument = mediaDocuments.find(
-    (document) => document.id === activePdfId,
-  );
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => void refreshPages(), 0);
@@ -52,13 +51,15 @@ export function PreviewWall() {
     };
   }, [refreshPages]);
 
+  const activeImages = activePdfId ? images[activePdfId] : [];
+
   return (
     <main className={styles.wall}>
-      {activeDocument?.kind === "images" ? (
+      {activePdfId && activeImages.length > 0 ? (
         <ImageViewer
-          images={activeDocument.images}
-          pageNumber={pages[activeDocument.id]}
-          label={activeDocument.id}
+          images={activeImages}
+          pageNumber={pages[activePdfId]}
+          label={activePdfId}
         />
       ) : (
         <PreviewSplash />

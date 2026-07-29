@@ -3,14 +3,49 @@
 import { useState, useEffect, useRef, DragEvent, ChangeEvent } from "react";
 import Link from "next/link";
 
+type AssetKind = "IMAGE" | "PDF" | "VIDEO" | "OTHER";
+type StorageProvider = "LOCAL" | "STATIC" | "CLOUDINARY";
+type PipelineKey = "CRT" | "MTU" | "STP";
+
 interface Asset {
   id: string;
   name: string;
   filename: string;
   url: string;
+  mimeType: string;
+  kind: AssetKind;
   size: number;
-  type: string;
-  uploadedAt: number;
+  width: number | null;
+  height: number | null;
+  pageCount: number | null;
+  storage: StorageProvider;
+  publicId: string | null;
+  checksum: string | null;
+  uploadedAt: string;
+}
+
+interface PipelineSlide {
+  id: string;
+  pipelineId: string;
+  assetId: string;
+  position: number;
+  createdAt: string;
+  asset: Asset;
+}
+
+interface PipelineData {
+  id: string;
+  key: PipelineKey;
+  legacyPdfId: string;
+  title: string;
+  accent: string;
+  position: number;
+  activeSlideId: string | null;
+  live: boolean;
+  pdfPage: number;
+  videoPlaying: boolean;
+  updatedAt: string;
+  slides: PipelineSlide[];
 }
 
 interface UploadingFile {
@@ -19,10 +54,18 @@ interface UploadingFile {
   progress: number;
 }
 
+function activeAssetIdFor(pipeline: PipelineData | undefined): string | null {
+  if (!pipeline) return null;
+  return pipeline.slides.find((s) => s.id === pipeline.activeSlideId)?.assetId ?? null;
+}
+
 export default function AdminPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [pipelines, setPipelines] = useState<PipelineData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
+  const [assetToDelete, setAssetToDelete] = useState<Asset | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // Upload modal states
@@ -30,32 +73,6 @@ export default function AdminPage() {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Pipeline slide states (UI only, supporting drag-and-drop reordering)
-  const [crtSlides, setCrtSlides] = useState<string[]>([
-    "/CRT/26.jpg",
-    "/CRT/27.jpg",
-    "/CRT/28.jpg",
-    "/CRT/29.jpg"
-  ]);
-  const [mtuSlides, setMtuSlides] = useState<string[]>([
-    "/MTU/30.jpg",
-    "/MTU/31.jpg",
-    "/MTU/32.jpg",
-    "/MTU/33.jpg"
-  ]);
-  const [stpSlides, setStpSlides] = useState<string[]>([
-    "/STP/34.jpg",
-    "/STP/35.jpg",
-    "/STP/36.jpg",
-    "/STP/37.jpg",
-    "/STP/38.jpg",
-    "/STP/39.jpg"
-  ]);
-
-  const [crtActiveIdx, setCrtActiveIdx] = useState<number>(0);
-  const [mtuActiveIdx, setMtuActiveIdx] = useState<number>(0);
-  const [stpActiveIdx, setStpActiveIdx] = useState<number>(0);
 
   const [crtOpen, setCrtOpen] = useState<boolean>(true);
   const [mtuOpen, setMtuOpen] = useState<boolean>(true);
@@ -65,49 +82,47 @@ export default function AdminPage() {
   const [draggedSlide, setDraggedSlide] = useState<{ pipeline: "crt" | "mtu" | "stp"; index: number } | null>(null);
   const [dragOverSlideIndex, setDragOverSlideIndex] = useState<number | null>(null);
 
-  // Two-way sync: active asset IDs for pipelines
-  const [activeCrtAssetId, setActiveCrtAssetId] = useState<string | null>(null);
-  const [activeMtuAssetId, setActiveMtuAssetId] = useState<string | null>(null);
-  const [activeStpAssetId, setActiveStpAssetId] = useState<string | null>(null);
+  const crtPipeline = pipelines.find((p) => p.key === "CRT");
+  const mtuPipeline = pipelines.find((p) => p.key === "MTU");
+  const stpPipeline = pipelines.find((p) => p.key === "STP");
 
-  useEffect(() => {
-    if (assets.length > 0) {
-      const crtUrl = crtActiveIdx !== -1 ? crtSlides[crtActiveIdx] : null;
-      const matchCrt = assets.find((a) => a.url === crtUrl);
-      setActiveCrtAssetId(matchCrt ? matchCrt.id : null);
+  const crtSlides = crtPipeline?.slides ?? [];
+  const mtuSlides = mtuPipeline?.slides ?? [];
+  const stpSlides = stpPipeline?.slides ?? [];
 
-      const mtuUrl = mtuActiveIdx !== -1 ? mtuSlides[mtuActiveIdx] : null;
-      const matchMtu = assets.find((a) => a.url === mtuUrl);
-      setActiveMtuAssetId(matchMtu ? matchMtu.id : null);
+  const activeCrtAssetId = activeAssetIdFor(crtPipeline);
+  const activeMtuAssetId = activeAssetIdFor(mtuPipeline);
+  const activeStpAssetId = activeAssetIdFor(stpPipeline);
 
-      const stpUrl = stpActiveIdx !== -1 ? stpSlides[stpActiveIdx] : null;
-      const matchStp = assets.find((a) => a.url === stpUrl);
-      setActiveStpAssetId(matchStp ? matchStp.id : null);
-    } else {
-      setActiveCrtAssetId(null);
-      setActiveMtuAssetId(null);
-      setActiveStpAssetId(null);
+  const handleTogglePipelineAsset = async (key: PipelineKey, asset: Asset) => {
+    const pipeline = pipelines.find((p) => p.key === key);
+    const currentActiveAssetId = activeAssetIdFor(pipeline);
+    const nextAssetId = currentActiveAssetId === asset.id ? null : asset.id;
+
+    try {
+      const res = await fetch(`/api/pipelines/${key.toLowerCase()}/active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetId: nextAssetId }),
+      });
+      if (!res.ok) throw new Error("Failed to update active slide");
+      await fetchPipelines();
+    } catch {
+      showToast("Failed to update pipeline", "error");
     }
-  }, [assets, crtSlides, crtActiveIdx, mtuSlides, mtuActiveIdx, stpSlides, stpActiveIdx]);
+  };
 
-  const handleTogglePipelineAsset = (pipeline: "crt" | "mtu" | "stp", asset: Asset) => {
-    const setSlides = pipeline === "crt" ? setCrtSlides : pipeline === "mtu" ? setMtuSlides : setStpSlides;
-    const setActiveIdx = pipeline === "crt" ? setCrtActiveIdx : pipeline === "mtu" ? setMtuActiveIdx : setStpActiveIdx;
-    const activeIdx = pipeline === "crt" ? crtActiveIdx : pipeline === "mtu" ? mtuActiveIdx : stpActiveIdx;
-    const slides = pipeline === "crt" ? crtSlides : pipeline === "mtu" ? mtuSlides : stpSlides;
-
-    const isAlreadyActive = activeIdx !== -1 && slides[activeIdx] === asset.url;
-
-    if (isAlreadyActive) {
-      setActiveIdx(-1);
-    } else {
-      const existingIdx = slides.indexOf(asset.url);
-      if (existingIdx !== -1) {
-        setActiveIdx(existingIdx);
-      } else {
-        setSlides((prev) => [...prev, asset.url]);
-        setActiveIdx(slides.length);
-      }
+  const handleSetActiveSlide = async (key: PipelineKey, assetId: string) => {
+    try {
+      const res = await fetch(`/api/pipelines/${key.toLowerCase()}/active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetId }),
+      });
+      if (!res.ok) throw new Error("Failed to set active slide");
+      await fetchPipelines();
+    } catch {
+      showToast("Failed to update pipeline", "error");
     }
   };
 
@@ -125,42 +140,41 @@ export default function AdminPage() {
     setDragOverSlideIndex(null);
   };
 
-  const handleSlideDrop = (pipeline: "crt" | "mtu" | "stp", targetIndex: number) => {
-    if (!draggedSlide || draggedSlide.pipeline !== pipeline) return;
+  const handleSlideDrop = async (pipelineKey: "crt" | "mtu" | "stp", targetIndex: number) => {
+    if (!draggedSlide || draggedSlide.pipeline !== pipelineKey) return;
     const sourceIndex = draggedSlide.index;
     if (sourceIndex === targetIndex) return;
 
-    const setSlides = 
-      pipeline === "crt" ? setCrtSlides : 
-      pipeline === "mtu" ? setMtuSlides : 
-      setStpSlides;
+    const upperKey = pipelineKey.toUpperCase() as PipelineKey;
+    const pipeline = pipelines.find((p) => p.key === upperKey);
+    if (!pipeline) return;
 
-    setSlides((prev) => {
-      const list = [...prev];
-      const [movedItem] = list.splice(sourceIndex, 1);
-      list.splice(targetIndex, 0, movedItem);
-      return list;
-    });
+    const reordered = [...pipeline.slides];
+    const [moved] = reordered.splice(sourceIndex, 1);
+    reordered.splice(targetIndex, 0, moved);
+    const assetIds = reordered.map((s) => s.assetId);
 
-    const activeIndex = 
-      pipeline === "crt" ? crtActiveIdx : 
-      pipeline === "mtu" ? mtuActiveIdx : 
-      stpActiveIdx;
-
-    const setActiveIdx = 
-      pipeline === "crt" ? setCrtActiveIdx : 
-      pipeline === "mtu" ? setMtuActiveIdx : 
-      setStpActiveIdx;
-
-    if (activeIndex === sourceIndex) {
-      setActiveIdx(targetIndex);
-    } else if (activeIndex > sourceIndex && activeIndex <= targetIndex) {
-      setActiveIdx((prev) => prev - 1);
-    } else if (activeIndex < sourceIndex && activeIndex >= targetIndex) {
-      setActiveIdx((prev) => prev + 1);
-    }
+    // Optimistic reorder so the drag feels instant; the server response reconciles slide ids after.
+    setPipelines((prev) =>
+      prev.map((p) =>
+        p.key === upperKey ? { ...p, slides: reordered.map((s, i) => ({ ...s, position: i })) } : p
+      )
+    );
 
     handleSlideDragEnd();
+
+    try {
+      const res = await fetch(`/api/pipelines/${pipelineKey}/slides`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetIds }),
+      });
+      if (!res.ok) throw new Error("Failed to reorder slides");
+      await fetchPipelines();
+    } catch {
+      showToast("Failed to reorder pipeline slides", "error");
+      await fetchPipelines();
+    }
   };
 
   // Fetch all uploaded assets
@@ -177,8 +191,21 @@ export default function AdminPage() {
     }
   };
 
+  // Fetch all pipelines with their ordered slides
+  const fetchPipelines = async () => {
+    try {
+      const res = await fetch("/api/pipelines");
+      if (!res.ok) throw new Error("Failed to load pipelines");
+      const data = (await res.json()) as PipelineData[];
+      setPipelines(data);
+    } catch {
+      showToast("Error loading pipelines", "error");
+    }
+  };
+
   useEffect(() => {
     void fetchAssets();
+    void fetchPipelines();
   }, []);
 
   // Helper to show toast message
@@ -214,19 +241,24 @@ export default function AdminPage() {
   };
 
   // Delete an asset
-  const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this asset?")) return;
+  const confirmDelete = async () => {
+    if (!assetToDelete) return;
+    setIsDeleting(true);
     try {
       const res = await fetch("/api/upload", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id: assetToDelete.id }),
       });
       if (!res.ok) throw new Error("Failed to delete asset");
       showToast("Asset deleted successfully", "success");
+      setAssetToDelete(null);
       void fetchAssets();
+      void fetchPipelines();
     } catch {
       showToast("Failed to delete asset", "error");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -296,7 +328,7 @@ export default function AdminPage() {
         prev.map((uf) => ({ ...uf, status: "success" }))
       );
       showToast(`Successfully uploaded ${uploadFiles.length} file(s)`, "success");
-      
+
       // Delay closing modal slightly so the user sees the success state
       setTimeout(() => {
         setIsModalOpen(false);
@@ -315,18 +347,18 @@ export default function AdminPage() {
 
   // Compute stat aggregates
   const totalSize = assets.reduce((acc, curr) => acc + curr.size, 0);
-  const imagesCount = assets.filter((a) => a.type.startsWith("image/")).length;
-  const pdfsCount = assets.filter((a) => a.type === "application/pdf").length;
+  const imagesCount = assets.filter((a) => a.kind === "IMAGE").length;
+  const pdfsCount = assets.filter((a) => a.kind === "PDF").length;
   const otherCount = assets.length - imagesCount - pdfsCount;
 
   return (
     <main className="relative min-h-screen w-full flex flex-col items-center p-6 md:p-12 lg:p-20 overflow-hidden bg-[#070b14] text-slate-100 font-sans">
       {/* Background radial glow effects */}
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-cyan-950/20 via-slate-950 to-slate-950 pointer-events-none" />
-      
+
       {/* Grid Overlay */}
-      <div 
-        className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:4rem_4rem] pointer-events-none" 
+      <div
+        className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:4rem_4rem] pointer-events-none"
         style={{ maskImage: "radial-gradient(ellipse at center, black, transparent 80%)", WebkitMaskImage: "radial-gradient(ellipse at center, black, transparent 80%)" }}
       />
 
@@ -337,8 +369,8 @@ export default function AdminPage() {
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-6 right-6 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl border backdrop-blur-xl shadow-2xl transition-all duration-300 animate-slide-in ${
-          toast.type === "success" 
-            ? "bg-emerald-950/80 border-emerald-500/35 text-emerald-300" 
+          toast.type === "success"
+            ? "bg-emerald-950/80 border-emerald-500/35 text-emerald-300"
             : "bg-rose-950/80 border-rose-500/35 text-rose-300"
         }`}>
           {toast.type === "success" ? (
@@ -457,22 +489,22 @@ export default function AdminPage() {
                   {assets.map((asset) => (
                     <tr key={asset.id} className="group hover:bg-white/[0.01] transition-colors">
                       <td className="py-4 pr-4">
-                        {asset.type.startsWith("image/") ? (
+                        {asset.kind === "IMAGE" ? (
                           <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-white/10 bg-slate-950">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img 
-                              src={asset.url} 
+                            <img
+                              src={asset.url}
                               alt={asset.name}
                               className="w-full h-full object-cover"
                             />
                           </div>
-                        ) : asset.type === "application/pdf" ? (
+                        ) : asset.kind === "PDF" ? (
                           <div className="w-12 h-12 rounded-lg border border-white/10 bg-purple-500/10 flex items-center justify-center text-purple-400">
                             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                               <path strokeLinecap="round" strokeLinejoin="round" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
                             </svg>
                           </div>
-                        ) : asset.type.startsWith("video/") ? (
+                        ) : asset.kind === "VIDEO" ? (
                           <div className="w-12 h-12 rounded-lg border border-white/10 bg-cyan-500/10 flex items-center justify-center text-cyan-400">
                             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                               <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -496,7 +528,7 @@ export default function AdminPage() {
                       </td>
                       <td className="py-4 pr-4 text-slate-300 hidden md:table-cell">
                         <span className="text-xs font-mono bg-slate-800/30 px-2 py-0.5 border border-white/5 rounded text-slate-400">
-                          {asset.type}
+                          {asset.mimeType}
                         </span>
                       </td>
                       <td className="py-4 pr-4 text-slate-300 font-mono text-xs">
@@ -509,7 +541,7 @@ export default function AdminPage() {
                         <div className="flex items-center justify-center gap-2">
                           {/* CRT Button */}
                           <button
-                            onClick={() => handleTogglePipelineAsset("crt", asset)}
+                            onClick={() => void handleTogglePipelineAsset("CRT", asset)}
                             className={`px-3 py-1.5 rounded-xl text-[10px] font-mono font-bold tracking-wider transition-all duration-200 border cursor-pointer ${
                               activeCrtAssetId === asset.id
                                 ? "bg-amber-400 border-amber-400 text-slate-950 shadow-[0_0_10px_rgba(245,158,11,0.25)]"
@@ -521,7 +553,7 @@ export default function AdminPage() {
 
                           {/* MTU Button */}
                           <button
-                            onClick={() => handleTogglePipelineAsset("mtu", asset)}
+                            onClick={() => void handleTogglePipelineAsset("MTU", asset)}
                             className={`px-3 py-1.5 rounded-xl text-[10px] font-mono font-bold tracking-wider transition-all duration-200 border cursor-pointer ${
                               activeMtuAssetId === asset.id
                                 ? "bg-cyan-400 border-cyan-400 text-slate-950 shadow-[0_0_10px_rgba(34,211,238,0.25)]"
@@ -533,7 +565,7 @@ export default function AdminPage() {
 
                           {/* STP Button */}
                           <button
-                            onClick={() => handleTogglePipelineAsset("stp", asset)}
+                            onClick={() => void handleTogglePipelineAsset("STP", asset)}
                             className={`px-3 py-1.5 rounded-xl text-[10px] font-mono font-bold tracking-wider transition-all duration-200 border cursor-pointer ${
                               activeStpAssetId === asset.id
                                 ? "bg-emerald-400 border-emerald-400 text-slate-950 shadow-[0_0_10px_rgba(16,185,129,0.25)]"
@@ -558,7 +590,7 @@ export default function AdminPage() {
                             </svg>
                           </a>
                           <button
-                            onClick={() => void handleDelete(asset.id)}
+                            onClick={() => setAssetToDelete(asset)}
                             title="Delete file"
                             className="p-2 rounded-lg border border-white/5 bg-slate-900/40 text-rose-500 hover:text-rose-400 hover:border-rose-500/25 transition-all cursor-pointer"
                           >
@@ -588,7 +620,7 @@ export default function AdminPage() {
           <div className="flex flex-col gap-8">
             {/* CRT Pipeline */}
             <div className="p-6 bg-slate-900/10 backdrop-blur-xl border border-white/5 rounded-3xl space-y-4 animate-fade-in">
-              <div 
+              <div
                 onClick={() => setCrtOpen(!crtOpen)}
                 className="flex justify-between items-center cursor-pointer select-none group/hdr hover:text-white transition-colors"
               >
@@ -600,13 +632,13 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   <span className="text-xs font-mono bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded">
-                    ACTIVE: {crtActiveIdx !== -1 ? crtSlides[crtActiveIdx]?.split("/").pop() : "NONE"}
+                    ACTIVE: {crtSlides.find((s) => s.id === crtPipeline?.activeSlideId)?.asset.name ?? "NONE"}
                   </span>
-                  <svg 
-                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-amber-400 transition-transform duration-300 ${crtOpen ? "rotate-180" : ""}`} 
-                    fill="none" 
-                    viewBox="0 0 24 24" 
-                    stroke="currentColor" 
+                  <svg
+                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-amber-400 transition-transform duration-300 ${crtOpen ? "rotate-180" : ""}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
                     strokeWidth="2.5"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -618,17 +650,17 @@ export default function AdminPage() {
               {crtOpen && (
                 <div className="flex gap-4 overflow-x-auto pb-3 custom-scrollbar animate-fade-in">
                   {crtSlides.map((slide, idx) => {
-                    const isActive = crtActiveIdx === idx;
+                    const isActive = crtPipeline?.activeSlideId === slide.id;
                     const isDraggingThis = draggedSlide?.pipeline === "crt" && draggedSlide.index === idx;
-                    const fileName = slide.split("/").pop();
+                    const fileName = slide.asset.name;
                     return (
                       <div
-                        key={idx}
+                        key={slide.id}
                         draggable
                         onDragStart={() => handleSlideDragStart("crt", idx)}
                         onDragOver={(e) => handleSlideDragOver(e, idx)}
                         onDragEnd={handleSlideDragEnd}
-                        onDrop={() => handleSlideDrop("crt", idx)}
+                        onDrop={() => void handleSlideDrop("crt", idx)}
                         className="flex flex-col gap-1.5 shrink-0 relative"
                       >
                         {/* Drag Insert Indicator Line */}
@@ -645,7 +677,7 @@ export default function AdminPage() {
 
                         {/* Slide Card Container */}
                         <div
-                          onClick={() => setCrtActiveIdx(idx)}
+                          onClick={() => void handleSetActiveSlide("CRT", slide.assetId)}
                           className={`w-44 border rounded-2xl overflow-hidden p-2 flex flex-col gap-2.5 transition-all duration-300 transform select-none cursor-grab active:cursor-grabbing ${
                             isDraggingThis
                               ? "opacity-20 border-dashed border-amber-500 scale-95"
@@ -659,12 +691,12 @@ export default function AdminPage() {
                             <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(0,0,0,0.15)_50%,rgba(0,0,0,0)_50%)] bg-[size:100%_4px] pointer-events-none z-10" />
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
-                              src={slide}
+                              src={slide.asset.url}
                               alt={fileName || "CRT Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
                           </div>
-                          
+
                           {/* Name and active status inside the card border (below the image) */}
                           <div className="flex justify-between items-center px-0.5 pb-0.5">
                             <span className="text-[10px] font-mono font-bold text-slate-300 truncate max-w-[100px]" title={fileName}>
@@ -686,7 +718,7 @@ export default function AdminPage() {
 
             {/* MTU Pipeline */}
             <div className="p-6 bg-slate-900/10 backdrop-blur-xl border border-white/5 rounded-3xl space-y-4 animate-fade-in">
-              <div 
+              <div
                 onClick={() => setMtuOpen(!mtuOpen)}
                 className="flex justify-between items-center cursor-pointer select-none group/hdr hover:text-white transition-colors"
               >
@@ -698,13 +730,13 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   <span className="text-xs font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-400/20 px-2 py-0.5 rounded">
-                    ACTIVE: {mtuActiveIdx !== -1 ? mtuSlides[mtuActiveIdx]?.split("/").pop() : "NONE"}
+                    ACTIVE: {mtuSlides.find((s) => s.id === mtuPipeline?.activeSlideId)?.asset.name ?? "NONE"}
                   </span>
-                  <svg 
-                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-cyan-400 transition-transform duration-300 ${mtuOpen ? "rotate-180" : ""}`} 
-                    fill="none" 
-                    viewBox="0 0 24 24" 
-                    stroke="currentColor" 
+                  <svg
+                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-cyan-400 transition-transform duration-300 ${mtuOpen ? "rotate-180" : ""}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
                     strokeWidth="2.5"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -716,17 +748,17 @@ export default function AdminPage() {
               {mtuOpen && (
                 <div className="flex gap-4 overflow-x-auto pb-3 custom-scrollbar animate-fade-in">
                   {mtuSlides.map((slide, idx) => {
-                    const isActive = mtuActiveIdx === idx;
+                    const isActive = mtuPipeline?.activeSlideId === slide.id;
                     const isDraggingThis = draggedSlide?.pipeline === "mtu" && draggedSlide.index === idx;
-                    const fileName = slide.split("/").pop();
+                    const fileName = slide.asset.name;
                     return (
                       <div
-                        key={idx}
+                        key={slide.id}
                         draggable
                         onDragStart={() => handleSlideDragStart("mtu", idx)}
                         onDragOver={(e) => handleSlideDragOver(e, idx)}
                         onDragEnd={handleSlideDragEnd}
-                        onDrop={() => handleSlideDrop("mtu", idx)}
+                        onDrop={() => void handleSlideDrop("mtu", idx)}
                         className="flex flex-col gap-1.5 shrink-0 relative"
                       >
                         {/* Drag Insert Indicator Line */}
@@ -743,7 +775,7 @@ export default function AdminPage() {
 
                         {/* Slide Card Container */}
                         <div
-                          onClick={() => setMtuActiveIdx(idx)}
+                          onClick={() => void handleSetActiveSlide("MTU", slide.assetId)}
                           className={`w-44 border rounded-2xl overflow-hidden p-2 flex flex-col gap-2.5 transition-all duration-300 transform select-none cursor-grab active:cursor-grabbing ${
                             isDraggingThis
                               ? "opacity-20 border-dashed border-cyan-500 scale-95"
@@ -757,7 +789,7 @@ export default function AdminPage() {
                             <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(0,0,0,0.15)_50%,rgba(0,0,0,0)_50%)] bg-[size:100%_4px] pointer-events-none z-10" />
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
-                              src={slide}
+                              src={slide.asset.url}
                               alt={fileName || "MTU Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
@@ -784,7 +816,7 @@ export default function AdminPage() {
 
             {/* STP Pipeline */}
             <div className="p-6 bg-slate-900/10 backdrop-blur-xl border border-white/5 rounded-3xl space-y-4 animate-fade-in">
-              <div 
+              <div
                 onClick={() => setStpOpen(!stpOpen)}
                 className="flex justify-between items-center cursor-pointer select-none group/hdr hover:text-white transition-colors"
               >
@@ -796,13 +828,13 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   <span className="text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded">
-                    ACTIVE: {stpActiveIdx !== -1 ? stpSlides[stpActiveIdx]?.split("/").pop() : "NONE"}
+                    ACTIVE: {stpSlides.find((s) => s.id === stpPipeline?.activeSlideId)?.asset.name ?? "NONE"}
                   </span>
-                  <svg 
-                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-emerald-400 transition-transform duration-300 ${stpOpen ? "rotate-180" : ""}`} 
-                    fill="none" 
-                    viewBox="0 0 24 24" 
-                    stroke="currentColor" 
+                  <svg
+                    className={`w-4 h-4 text-slate-500 group-hover/hdr:text-emerald-400 transition-transform duration-300 ${stpOpen ? "rotate-180" : ""}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
                     strokeWidth="2.5"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -814,17 +846,17 @@ export default function AdminPage() {
               {stpOpen && (
                 <div className="flex gap-4 overflow-x-auto pb-3 custom-scrollbar animate-fade-in">
                   {stpSlides.map((slide, idx) => {
-                    const isActive = stpActiveIdx === idx;
+                    const isActive = stpPipeline?.activeSlideId === slide.id;
                     const isDraggingThis = draggedSlide?.pipeline === "stp" && draggedSlide.index === idx;
-                    const fileName = slide.split("/").pop();
+                    const fileName = slide.asset.name;
                     return (
                       <div
-                        key={idx}
+                        key={slide.id}
                         draggable
                         onDragStart={() => handleSlideDragStart("stp", idx)}
                         onDragOver={(e) => handleSlideDragOver(e, idx)}
                         onDragEnd={handleSlideDragEnd}
-                        onDrop={() => handleSlideDrop("stp", idx)}
+                        onDrop={() => void handleSlideDrop("stp", idx)}
                         className="flex flex-col gap-1.5 shrink-0 relative"
                       >
                         {/* Drag Insert Indicator Line */}
@@ -841,7 +873,7 @@ export default function AdminPage() {
 
                         {/* Slide Card Container */}
                         <div
-                          onClick={() => setStpActiveIdx(idx)}
+                          onClick={() => void handleSetActiveSlide("STP", slide.assetId)}
                           className={`w-44 border rounded-2xl overflow-hidden p-2 flex flex-col gap-2.5 transition-all duration-300 transform select-none cursor-grab active:cursor-grabbing ${
                             isDraggingThis
                               ? "opacity-20 border-dashed border-emerald-500 scale-95"
@@ -855,7 +887,7 @@ export default function AdminPage() {
                             <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(0,0,0,0.15)_50%,rgba(0,0,0,0)_50%)] bg-[size:100%_4px] pointer-events-none z-10" />
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
-                              src={slide}
+                              src={slide.asset.url}
                               alt={fileName || "STP Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
@@ -886,7 +918,7 @@ export default function AdminPage() {
       {/* Multi-File Upload Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-[#040710]/85 backdrop-blur-md flex items-center justify-center z-50 p-4 transition-all duration-300 animate-fade-in">
-          <div 
+          <div
             className="w-full max-w-xl bg-slate-950 border border-white/10 rounded-3xl p-6 md:p-8 shadow-2xl flex flex-col gap-6 transform scale-100 transition-all duration-300"
             onClick={(e) => e.stopPropagation()}
           >
@@ -919,8 +951,8 @@ export default function AdminPage() {
               onDrop={handleDrop}
               onClick={() => !isUploading && fileInputRef.current?.click()}
               className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center gap-4 text-center cursor-pointer transition-all duration-200 ${
-                isDragging 
-                  ? "border-cyan-400 bg-cyan-950/15 shadow-[0_0_20px_rgba(34,211,238,0.05)]" 
+                isDragging
+                  ? "border-cyan-400 bg-cyan-950/15 shadow-[0_0_20px_rgba(34,211,238,0.05)]"
                   : "border-white/10 bg-slate-900/20 hover:border-white/20 hover:bg-slate-900/40"
               } ${isUploading ? "pointer-events-none opacity-50" : ""}`}
             >
@@ -931,7 +963,7 @@ export default function AdminPage() {
                 onChange={handleFileChange}
                 className="hidden"
               />
-              
+
               <div className="w-12 h-12 rounded-full bg-slate-900 border border-white/5 flex items-center justify-center text-slate-400">
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
@@ -959,8 +991,8 @@ export default function AdminPage() {
                 </p>
                 <div className="space-y-2">
                   {uploadFiles.map((uf, index) => (
-                    <div 
-                      key={index} 
+                    <div
+                      key={index}
                       className="flex items-center justify-between p-3 rounded-xl bg-slate-900/50 border border-white/5 text-xs text-slate-300"
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -985,7 +1017,7 @@ export default function AdminPage() {
                           <p className="text-[10px] text-slate-500 font-mono mt-0.5">{formatBytes(uf.file.size)}</p>
                         </div>
                       </div>
-                      
+
                       {!isUploading && uf.status === "pending" && (
                         <button
                           onClick={() => removeUploadFile(index)}
@@ -1022,6 +1054,95 @@ export default function AdminPage() {
                 className="py-3 px-5 text-xs font-mono font-bold tracking-wider rounded-xl bg-cyan-400 hover:bg-cyan-300 text-[#070b14] transition-all shadow-[0_0_20px_rgba(34,211,238,0.15)] disabled:opacity-30 disabled:shadow-none cursor-pointer"
               >
                 {isUploading ? "UPLOADING..." : "UPLOAD FILES"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {assetToDelete && (
+        <div
+          className="fixed inset-0 bg-[#040710]/85 backdrop-blur-md flex items-center justify-center z-50 p-4 transition-all duration-300 animate-fade-in"
+          onClick={() => !isDeleting && setAssetToDelete(null)}
+        >
+          <div
+            className="w-full max-w-md bg-slate-950 border border-rose-500/20 rounded-3xl p-6 md:p-8 shadow-2xl flex flex-col gap-6 transform scale-100 transition-all duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-white">Delete Asset</h3>
+                <p className="text-xs text-slate-400 font-light mt-1">
+                  Are you sure you want to delete this asset? This action cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            {/* Asset Preview Card */}
+            <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-900/60 border border-white/5">
+              {assetToDelete.kind === "IMAGE" ? (
+                <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-white/10 bg-slate-950 shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={assetToDelete.url} alt={assetToDelete.name} className="w-full h-full object-cover" />
+                </div>
+              ) : (
+                <div className="w-12 h-12 rounded-xl border border-white/10 bg-purple-500/10 flex items-center justify-center text-purple-400 shrink-0">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-white truncate" title={assetToDelete.name}>
+                  {assetToDelete.name}
+                </p>
+                <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-400 font-mono">
+                  <span>{assetToDelete.kind}</span>
+                  <span>•</span>
+                  <span>{formatBytes(assetToDelete.size)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Warning Note */}
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300/90 flex items-start gap-2.5">
+              <svg className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <span>This file will be permanently removed from storage and unlinked from active pipelines.</span>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex gap-3 justify-end pt-2 border-t border-white/5">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setAssetToDelete(null)}
+                className="py-2.5 px-5 text-xs font-mono font-bold tracking-wider rounded-xl border border-white/10 hover:border-white/20 text-slate-400 hover:text-white transition-all cursor-pointer disabled:opacity-40"
+              >
+                CANCEL
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => void confirmDelete()}
+                className="py-2.5 px-5 text-xs font-mono font-bold tracking-wider rounded-xl bg-rose-500 hover:bg-rose-600 text-white transition-all shadow-[0_0_20px_rgba(244,63,94,0.3)] disabled:opacity-40 cursor-pointer flex items-center gap-2"
+              >
+                {isDeleting ? (
+                  <>
+                    <div className="w-3.5 h-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+                    DELETING...
+                  </>
+                ) : (
+                  "DELETE ASSET"
+                )}
               </button>
             </div>
           </div>

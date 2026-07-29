@@ -40,6 +40,7 @@ export type PdfPageState = {
   page: number;
   totalPages: number | null;
   updatedAt: number;
+  images: string[];
 };
 
 export type PdfControlState = Record<PdfId, PdfPageState>;

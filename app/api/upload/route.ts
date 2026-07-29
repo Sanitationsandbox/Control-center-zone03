@@ -1,49 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
+import crypto from "crypto";
+import { prisma } from "@/lib/prisma";
+import { uploadToCloudinary, uploadBufferToCloudinary, deleteFromCloudinary } from "@/lib/cloudinary";
+import { AssetKind } from "@/lib/generated/prisma/enums";
 
 export const dynamic = "force-dynamic";
 
-const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
-const METADATA_PATH = path.join(UPLOAD_DIR, "metadata.json");
+const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 
-interface Asset {
-  id: string;
-  name: string;
-  filename: string;
-  url: string;
-  size: number;
-  type: string;
-  uploadedAt: number;
+function kindFromMime(mime: string): AssetKind {
+  if (mime.startsWith("image/")) return AssetKind.IMAGE;
+  if (mime === "application/pdf") return AssetKind.PDF;
+  if (mime.startsWith("video/")) return AssetKind.VIDEO;
+  return AssetKind.OTHER;
 }
 
-async function ensureUploadDir() {
-  await fs.mkdir(UPLOAD_DIR, { recursive: true });
-  try {
-    await fs.access(METADATA_PATH);
-  } catch {
-    await fs.writeFile(METADATA_PATH, JSON.stringify([]));
-  }
-}
-
-async function readMetadata(): Promise<Asset[]> {
-  await ensureUploadDir();
-  try {
-    const data = await fs.readFile(METADATA_PATH, "utf-8");
-    return JSON.parse(data) as Asset[];
-  } catch {
-    return [];
-  }
-}
-
-async function writeMetadata(assets: Asset[]): Promise<void> {
-  await ensureUploadDir();
-  await fs.writeFile(METADATA_PATH, JSON.stringify(assets, null, 2));
+function resourceTypeFor(kind: AssetKind): "image" | "video" | "raw" {
+  if (kind === AssetKind.VIDEO) return "video";
+  if (kind === AssetKind.PDF) return "raw";
+  return "image";
 }
 
 export async function GET() {
   try {
-    const assets = await readMetadata();
+    const assets = await prisma.asset.findMany({ orderBy: { uploadedAt: "desc" } });
     return NextResponse.json(assets);
   } catch (error) {
     console.error("GET assets error:", error);
@@ -53,50 +33,55 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    await ensureUploadDir();
     const formData = await request.formData();
-    const files = formData.getAll("files") as File[];
+    const files = formData.getAll("files").filter((f): f is File => f instanceof File);
 
-    if (!files || files.length === 0) {
+    if (files.length === 0) {
       return NextResponse.json({ error: "No files provided" }, { status: 400 });
     }
 
-    const currentAssets = await readMetadata();
-    const newAssets: Asset[] = [];
+    const createdAssets = [];
 
     for (const file of files) {
-      if (!file || !(file instanceof File)) continue;
-
       const buffer = Buffer.from(await file.arrayBuffer());
-      const timestamp = Date.now();
-      const ext = path.extname(file.name);
-      const baseName = path.basename(file.name, ext);
-      
-      // Sanitize base name to make it filesystem safe
-      const sanitizedName = baseName.replace(/[^a-zA-Z0-9-_]/g, "_");
-      const uuid = crypto.randomUUID();
-      const uniqueFilename = `${sanitizedName}-${uuid}${ext}`;
-      const filePath = path.join(UPLOAD_DIR, uniqueFilename);
+      const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
 
-      await fs.writeFile(filePath, buffer);
+      const existing = await prisma.asset.findUnique({ where: { checksum } });
+      if (existing) {
+        createdAssets.push(existing);
+        continue;
+      }
 
-      const asset: Asset = {
-        id: uuid,
-        name: file.name,
-        filename: uniqueFilename,
-        url: `/uploads/${uniqueFilename}`,
-        size: file.size,
-        type: file.type || "application/octet-stream",
-        uploadedAt: timestamp,
-      };
+      const mimeType = file.type || "application/octet-stream";
+      const kind = kindFromMime(mimeType);
+      const uploadOptions = { folder: "control-center", resource_type: "auto" as const };
 
-      newAssets.push(asset);
+      const result =
+        buffer.length > LARGE_FILE_THRESHOLD
+          ? await uploadBufferToCloudinary(buffer, uploadOptions)
+          : await uploadToCloudinary(`data:${mimeType};base64,${buffer.toString("base64")}`, uploadOptions);
+
+      const asset = await prisma.asset.create({
+        data: {
+          name: file.name,
+          filename: result.public_id,
+          url: result.secure_url,
+          mimeType,
+          kind,
+          size: result.bytes ?? file.size,
+          width: result.width ?? null,
+          height: result.height ?? null,
+          pageCount: kind === AssetKind.PDF ? result.pages ?? null : null,
+          storage: "CLOUDINARY",
+          publicId: result.public_id,
+          checksum,
+        },
+      });
+
+      createdAssets.push(asset);
     }
 
-    const updatedAssets = [...newAssets, ...currentAssets];
-    await writeMetadata(updatedAssets);
-
-    return NextResponse.json({ success: true, assets: newAssets });
+    return NextResponse.json({ success: true, assets: createdAssets });
   } catch (error) {
     console.error("POST upload error:", error);
     return NextResponse.json({ error: "Failed to upload files" }, { status: 500 });
@@ -105,27 +90,25 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const { id } = await request.json() as { id?: string };
+    const { id } = (await request.json()) as { id?: string };
     if (!id) {
       return NextResponse.json({ error: "Missing asset ID" }, { status: 400 });
     }
 
-    const currentAssets = await readMetadata();
-    const assetToDelete = currentAssets.find((a) => a.id === id);
-
-    if (!assetToDelete) {
+    const asset = await prisma.asset.findUnique({ where: { id } });
+    if (!asset) {
       return NextResponse.json({ error: "Asset not found" }, { status: 404 });
     }
 
-    const filePath = path.join(UPLOAD_DIR, assetToDelete.filename);
-    try {
-      await fs.unlink(filePath);
-    } catch (err) {
-      console.warn(`File already deleted or inaccessible: ${filePath}`, err);
+    if (asset.storage === "CLOUDINARY" && asset.publicId) {
+      try {
+        await deleteFromCloudinary(asset.publicId, { resource_type: resourceTypeFor(asset.kind) });
+      } catch (err) {
+        console.warn(`Cloudinary destroy failed for ${asset.publicId}`, err);
+      }
     }
 
-    const updatedAssets = currentAssets.filter((a) => a.id !== id);
-    await writeMetadata(updatedAssets);
+    await prisma.asset.delete({ where: { id } });
 
     return NextResponse.json({ success: true });
   } catch (error) {

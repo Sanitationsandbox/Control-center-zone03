@@ -1,0 +1,89 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+enum AssetKind {
+  IMAGE
+  PDF
+  VIDEO
+  OTHER
+}
+
+enum StorageProvider {
+  LOCAL       // public/uploads — what /api/upload writes today
+  STATIC      // committed under public/CRT, /MTU, /STP
+  CLOUDINARY  // lib/cloudinary.ts
+}
+
+enum PipelineKey {
+  CRT
+  MTU
+  STP
+}
+
+model Asset {
+  id         String          @id @default(uuid(7))
+  name       String          // original filename, shown in the table
+  filename   String  @unique // sanitized stored name
+  url        String          // what <img src> and ImageViewer consume
+  mimeType   String          // the "type" column
+  kind       AssetKind       // derived at upload; powers the four stat cards
+  size       Int
+  width      Int?
+  height     Int?
+  pageCount  Int?            // replaces PATCH /api/pdf-control totalPages
+  storage    StorageProvider @default(LOCAL)
+  publicId   String?         // Cloudinary public_id, for deleteFromCloudinary
+  checksum   String? @unique // sha256 — dedupes re-uploads
+  uploadedAt DateTime        @default(now())
+
+  slides Slide[]
+
+  @@index([kind])
+  @@index([uploadedAt])
+}
+
+model Pipeline {
+  id          String      @id @default(uuid(7))
+  key         PipelineKey @unique
+  legacyPdfId String      @unique  // "pdf-1" — keeps preview pages working unchanged
+  title       String               // "CRT Pipeline"
+  accent      String               // "amber" | "cyan" | "emerald"
+  position    Int                  // order of the three cards
+
+  activeSlideId String? @unique
+  activeSlide   Slide?  @relation("ActiveSlide", fields: [activeSlideId], references: [id], onDelete: SetNull)
+
+  live         Boolean @default(false) // exactly one pipeline is "live" on the master output at a time
+  pdfPage      Int     @default(1) // page *within* the active slide, if it's a multi-page PDF
+  videoPlaying Boolean @default(false)
+  updatedAt    DateTime @updatedAt
+
+  slides Slide[] @relation("PipelineSlides")
+}
+
+model Slide {
+  id         String   @id @default(uuid(7))
+  pipelineId String
+  assetId    String
+  position   Int
+  createdAt  DateTime @default(now())
+
+  pipeline  Pipeline  @relation("PipelineSlides", fields: [pipelineId], references: [id], onDelete: Cascade)
+  asset     Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  activeFor Pipeline? @relation("ActiveSlide")
+
+  @@unique([pipelineId, assetId])
+  @@index([pipelineId, position])
+}

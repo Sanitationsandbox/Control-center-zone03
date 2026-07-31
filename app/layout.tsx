@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: " Screen Controller",
-  description: " Screen Controller application.",
+  title: "Screen Controller",
+  description: "Screen Controller application.",
 };
 
 export default function RootLayout({

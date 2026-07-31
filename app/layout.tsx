@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Rubenius Screen Controller",
-  description: "Rubenius Screen Controller application.",
+  title: " Screen Controller",
+  description: " Screen Controller application.",
 };
 
 export default function RootLayout({

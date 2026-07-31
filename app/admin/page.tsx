@@ -177,6 +177,43 @@ export default function AdminPage() {
     }
   };
 
+  const handleRemoveSlide = async (key: PipelineKey, assetId: string) => {
+    const pipeline = pipelines.find((p) => p.key === key);
+    if (!pipeline) return;
+
+    const remainingAssetIds = pipeline.slides
+      .filter((s) => s.assetId !== assetId)
+      .map((s) => s.assetId);
+
+    // Optimistically update the UI
+    setPipelines((prev) =>
+      prev.map((p) =>
+        p.key === key
+          ? {
+              ...p,
+              slides: p.slides
+                .filter((s) => s.assetId !== assetId)
+                .map((s, idx) => ({ ...s, position: idx })),
+            }
+          : p
+      )
+    );
+
+    try {
+      const res = await fetch(`/api/pipelines/${key.toLowerCase()}/slides`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetIds: remainingAssetIds }),
+      });
+      if (!res.ok) throw new Error("Failed to remove slide");
+      await fetchPipelines();
+      showToast("Removed slide from pipeline", "success");
+    } catch {
+      showToast("Failed to remove slide", "error");
+      await fetchPipelines();
+    }
+  };
+
   // Fetch all uploaded assets
   const fetchAssets = async () => {
     try {
@@ -695,6 +732,18 @@ export default function AdminPage() {
                               alt={fileName || "CRT Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleRemoveSlide("CRT", slide.assetId);
+                              }}
+                              className="absolute top-2 right-2 z-20 p-1 rounded-full bg-slate-950/70 hover:bg-rose-600/90 text-slate-400 hover:text-white border border-white/10 hover:border-rose-500/30 transition-all duration-200 cursor-pointer"
+                              title="Remove from pipeline"
+                            >
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
                           </div>
 
                           {/* Name and active status inside the card border (below the image) */}
@@ -793,6 +842,18 @@ export default function AdminPage() {
                               alt={fileName || "MTU Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleRemoveSlide("MTU", slide.assetId);
+                              }}
+                              className="absolute top-2 right-2 z-20 p-1 rounded-full bg-slate-950/70 hover:bg-rose-600/90 text-slate-400 hover:text-white border border-white/10 hover:border-rose-500/30 transition-all duration-200 cursor-pointer"
+                              title="Remove from pipeline"
+                            >
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
                           </div>
 
                           {/* Name and active status inside the card border (below the image) */}
@@ -891,6 +952,18 @@ export default function AdminPage() {
                               alt={fileName || "STP Slide"}
                               className="w-full h-full object-cover pointer-events-none"
                             />
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleRemoveSlide("STP", slide.assetId);
+                              }}
+                              className="absolute top-2 right-2 z-20 p-1 rounded-full bg-slate-950/70 hover:bg-rose-600/90 text-slate-400 hover:text-white border border-white/10 hover:border-rose-500/30 transition-all duration-200 cursor-pointer"
+                              title="Remove from pipeline"
+                            >
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
                           </div>
 
                           {/* Name and active status inside the card border (below the image) */}

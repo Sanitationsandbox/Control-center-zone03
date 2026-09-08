@@ -1,41 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { type PdfRemoteState } from "@/lib/pdf-control";
+import { useControlSocket } from "@/lib/use-control-socket";
 
 export function HomeStatus() {
-  const [systemState, setSystemState] = useState<PdfRemoteState | null>(null);
-  const [latency, setLatency] = useState<number>(0);
-  const [isConnected, setIsConnected] = useState<boolean>(true);
-
-  async function fetchStatus() {
-    const startTime = performance.now();
-    try {
-      const response = await fetch("/api/pdf-control", { cache: "no-store" });
-      if (!response.ok) throw new Error("Offline");
-      const data = (await response.json()) as PdfRemoteState;
-      setSystemState(data);
-      setIsConnected(true);
-      setLatency(Math.round(performance.now() - startTime));
-    } catch {
-      setIsConnected(false);
-      setLatency(0);
-    }
-  }
-
-  useEffect(() => {
-    const initialTimer = setTimeout(() => {
-      void fetchStatus();
-    }, 0);
-    const interval = setInterval(() => {
-      void fetchStatus();
-    }, 1500);
-    return () => {
-      clearTimeout(initialTimer);
-      clearInterval(interval);
-    };
-  }, []);
+  const { state: systemState, status, latency } = useControlSocket();
+  const isConnected = status === "connected";
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-12">
@@ -67,7 +37,7 @@ export function HomeStatus() {
           <div>
             <p className="text-xs text-slate-400 font-mono uppercase tracking-wider">Sync Latency</p>
             <p className="text-sm font-semibold font-mono text-cyan-400">
-              {isConnected ? `${latency} ms` : "--"}
+              {isConnected && latency !== null ? `${latency} ms` : "--"}
             </p>
           </div>
           <div>
@@ -116,7 +86,7 @@ export function HomeStatus() {
               <div className="pt-2 flex items-center gap-2 text-xs font-mono text-slate-500">
                 <span>Slide page:</span>
                 <span className="text-slate-300 font-semibold">
-                  {systemState ? `${systemState.documents["pdf-1"].page} / 4` : "--"}
+                  {systemState ? `${systemState.documents["pdf-1"].page} / ${systemState.documents["pdf-1"].totalPages ?? "?"}` : "--"}
                 </span>
               </div>
             </div>
@@ -170,7 +140,7 @@ export function HomeStatus() {
               <div className="pt-2 flex items-center gap-2 text-xs font-mono text-slate-500">
                 <span>Slide page:</span>
                 <span className="text-slate-300 font-semibold">
-                  {systemState ? `${systemState.documents["pdf-2"].page} / 4` : "--"}
+                  {systemState ? `${systemState.documents["pdf-2"].page} / ${systemState.documents["pdf-2"].totalPages ?? "?"}` : "--"}
                 </span>
               </div>
             </div>
@@ -223,7 +193,7 @@ export function HomeStatus() {
               <div className="pt-2 flex items-center gap-2 text-xs font-mono text-slate-500">
                 <span>Slide page:</span>
                 <span className="text-slate-300 font-semibold">
-                  {systemState ? `${systemState.documents["pdf-3"].page} / 4` : "--"}
+                  {systemState ? `${systemState.documents["pdf-3"].page} / ${systemState.documents["pdf-3"].totalPages ?? "?"}` : "--"}
                 </span>
               </div>
             </div>

@@ -1,40 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { type PdfRemoteState } from "@/lib/pdf-control";
+import { useControlSocket } from "@/lib/use-control-socket";
 import { ImageViewer } from "../preview/components/ImageViewer";
+import { PreviewSplash } from "../preview/components/PreviewSplash";
 import styles from "../preview/preview.module.css";
 
-export default function PreviewStpPage() {
-  const [page, setPage] = useState(1);
-  const [images, setImages] = useState<string[]>([]);
-
-  useEffect(() => {
-    async function syncState() {
-      try {
-        const response = await fetch("/api/pdf-control", { cache: "no-store" });
-        if (response.ok) {
-          const data = (await response.json()) as PdfRemoteState;
-          setPage(data.documents["pdf-3"].page);
-          setImages(data.documents["pdf-3"].images);
-        }
-      } catch {
-        // Ignore API offline errors silently
-      }
-    }
-
-    const initialTimer = window.setTimeout(() => void syncState(), 0);
-    const timer = window.setInterval(() => void syncState(), 700);
-    return () => {
-      window.clearTimeout(initialTimer);
-      window.clearInterval(timer);
-    };
-  }, []);
+export default function PreviewSTPPage() {
+  const { state } = useControlSocket();
+  const document = state?.documents["pdf-3"];
 
   return (
     <main className={styles.wall}>
-      {images.length > 0 && (
-        <ImageViewer images={images} pageNumber={page} label="pdf-3" />
+      {document && document.images.length > 0 ? (
+        <ImageViewer
+          images={document.images}
+          pageNumber={document.page}
+          label="pdf-3"
+        />
+      ) : (
+        <PreviewSplash />
       )}
     </main>
   );

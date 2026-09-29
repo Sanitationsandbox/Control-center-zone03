@@ -15,7 +15,12 @@ function json(data: unknown, status = 200) {
 }
 
 export async function GET() {
-  return json(await loadControlState());
+  try {
+    return json(await loadControlState());
+  } catch (error) {
+    console.error("Failed to load control state", error);
+    return json({ error: "Control state is temporarily unavailable" }, 503);
+  }
 }
 
 export async function POST(request: Request) {
@@ -28,9 +33,14 @@ export async function POST(request: Request) {
     return json({ error: "Invalid PDF command" }, 400);
   }
 
-  const state = await applyControlCommand(command);
-  await publishControlState(state);
-  return json(state);
+  try {
+    const state = await applyControlCommand(command);
+    await publishControlState(state);
+    return json(state);
+  } catch (error) {
+    console.error("Failed to apply control command", error);
+    return json({ error: "Control state is temporarily unavailable" }, 503);
+  }
 }
 
 export async function PATCH() {

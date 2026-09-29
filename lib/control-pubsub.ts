@@ -1,108 +1,167 @@
 import "server-only";
 
-import Redis from "ioredis";
-import { broadcastControlState, CONTROL_STATE_CHANNEL } from "@/lib/control-events";
+import pg from "pg";
+import { broadcastControlState } from "@/lib/control-events";
+import { loadControlState } from "@/lib/control-state";
 import type { PdfRemoteState } from "@/lib/pdf-control";
 
+/** Must be a valid Postgres identifier because it is interpolated into LISTEN. */
+const CONTROL_STATE_CHANNEL = "zone03_control_state";
+
+const RECONNECT_BASE_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
+
 const globalForControlPubSub = globalThis as typeof globalThis & {
-  controlRedisPublisher?: Redis;
-  controlRedisSubscriber?: Redis;
-  controlRedisWarned?: boolean;
+  controlNotifyPool?: pg.Pool;
+  controlListenClient?: pg.Client;
+  controlListenStarted?: boolean;
+  controlListenAttempt?: number;
+  controlLastBroadcastVersion?: number;
+  controlPubSubWarned?: boolean;
 };
 
-const MISSING_REDIS_MESSAGE =
-  "REDIS_URL is not set. Control commands are broadcast only to WebSocket clients " +
-  "attached to this process, so preview screens served by any other instance will " +
-  "silently never update.";
+const MISSING_DATABASE_URL_MESSAGE =
+  "DATABASE_URL is not set. Cross-instance control-state updates are disabled.";
 
 /**
- * Resolves REDIS_URL, or decides how to fail. In production a missing URL is a
- * broken deployment — fan-out across function instances is the whole point — so
- * the caller throws and the request surfaces it. This is deliberately lazy rather
- * than a module-level throw: a module-level throw would also fail `next build`,
- * which collects page data for every route handler.
+ * LISTEN needs a direct Postgres connection. Transaction-mode poolers accept the
+ * statement but cannot keep the session that receives notifications. A dedicated
+ * DIRECT_DATABASE_URL is therefore preferred. Neon's conventional "-pooler"
+ * hostname can be converted safely; other providers should set the direct URL.
  */
-function resolveRedisUrl(): string | null {
-  const redisUrl = process.env.REDIS_URL;
-  if (redisUrl) return redisUrl;
+function resolveDirectDatabaseUrl(): string | null {
+  const explicit = process.env.DIRECT_DATABASE_URL;
+  if (explicit) return explicit;
 
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(MISSING_REDIS_MESSAGE);
-  }
-
-  if (!globalForControlPubSub.controlRedisWarned) {
-    globalForControlPubSub.controlRedisWarned = true;
-    console.warn(`${MISSING_REDIS_MESSAGE} This is fine for single-process local development.`);
-  }
-
-  return null;
-}
-
-function getPublisher(): Redis | null {
-  const redisUrl = resolveRedisUrl();
-  if (!redisUrl) return null;
-
-  globalForControlPubSub.controlRedisPublisher ??= new Redis(redisUrl);
-  return globalForControlPubSub.controlRedisPublisher;
-}
-
-function getSubscriber(): Redis | null {
-  const redisUrl = resolveRedisUrl();
-  if (!redisUrl) return null;
-  if (globalForControlPubSub.controlRedisSubscriber) {
-    return globalForControlPubSub.controlRedisSubscriber;
-  }
-
-  const subscriber = new Redis(redisUrl);
-  globalForControlPubSub.controlRedisSubscriber = subscriber;
-
-  subscriber.on("message", (channel, message) => {
-    if (channel !== CONTROL_STATE_CHANNEL) return;
-
-    try {
-      broadcastControlState(JSON.parse(message) as PdfRemoteState);
-    } catch {
-      // Ignore malformed pub/sub messages from outside this app.
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    if (!globalForControlPubSub.controlPubSubWarned) {
+      globalForControlPubSub.controlPubSubWarned = true;
+      console.warn(MISSING_DATABASE_URL_MESSAGE);
     }
+    return null;
+  }
+
+  if (!databaseUrl.includes("-pooler")) return databaseUrl;
+
+  if (!globalForControlPubSub.controlPubSubWarned) {
+    globalForControlPubSub.controlPubSubWarned = true;
+    console.warn(
+      "DATABASE_URL points at a Neon pooler, which cannot hold a LISTEN. " +
+        "Using the derived direct endpoint. Set DIRECT_DATABASE_URL explicitly " +
+        "for any other database provider or pooler.",
+    );
+  }
+
+  return databaseUrl.replace("-pooler", "");
+}
+
+function getNotifyPool(): pg.Pool | null {
+  const connectionString = resolveDirectDatabaseUrl();
+  if (!connectionString) return null;
+
+  globalForControlPubSub.controlNotifyPool ??= new pg.Pool({
+    connectionString,
+    max: 2,
+  });
+  return globalForControlPubSub.controlNotifyPool;
+}
+
+async function fanOutFromNotification(rawVersion: string) {
+  const version = Number(rawVersion);
+
+  // The publishing instance broadcasts locally before NOTIFY. Ignore the echo
+  // that Postgres sends back to that same instance.
+  if (
+    Number.isFinite(version) &&
+    version <= (globalForControlPubSub.controlLastBroadcastVersion ?? 0)
+  ) {
+    return;
+  }
+
+  try {
+    const state = await loadControlState();
+    globalForControlPubSub.controlLastBroadcastVersion = state.version;
+    broadcastControlState(state);
+  } catch (error) {
+    console.error("Failed to load control state after notification", error);
+  }
+}
+
+function scheduleReconnect(failed: pg.Client) {
+  // A client can emit both error and end. Only the current client may start a
+  // reconnect, otherwise one failure creates two independent retry loops.
+  if (globalForControlPubSub.controlListenClient !== failed) return;
+
+  globalForControlPubSub.controlListenClient = undefined;
+  globalForControlPubSub.controlListenStarted = false;
+
+  const attempt = globalForControlPubSub.controlListenAttempt ?? 0;
+  globalForControlPubSub.controlListenAttempt = attempt + 1;
+  const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+
+  void failed.end().catch(() => undefined);
+  setTimeout(() => void ensureControlStateSubscription(), delay).unref?.();
+}
+
+async function startListener(connectionString: string) {
+  const client = new pg.Client({ connectionString });
+  globalForControlPubSub.controlListenClient = client;
+
+  client.on("notification", (message) => {
+    if (message.channel !== CONTROL_STATE_CHANNEL || !message.payload) return;
+    void fanOutFromNotification(message.payload);
   });
 
-  // ioredis reconnects the socket on its own, but the subscription has to be
-  // re-established every time it comes back. Driving this off "ready" — which
-  // fires on the initial connect and after every reconnect — is what keeps a
-  // Redis blip from permanently freezing screens that are still connected.
-  subscriber.on("ready", () => {
-    subscriber.subscribe(CONTROL_STATE_CHANNEL).catch((error) => {
-      console.error("Failed to subscribe to control state channel", error);
-    });
+  client.on("error", (error) => {
+    console.error("Control state listener error", error);
+    scheduleReconnect(client);
   });
 
-  subscriber.on("error", (error) => {
-    console.error("Control state Redis subscriber error", error);
-  });
+  client.on("end", () => scheduleReconnect(client));
 
-  return subscriber;
+  await client.connect();
+  await client.query(`LISTEN ${CONTROL_STATE_CHANNEL}`);
+  globalForControlPubSub.controlListenAttempt = 0;
 }
 
 export async function publishControlState(state: PdfRemoteState) {
+  globalForControlPubSub.controlLastBroadcastVersion = state.version;
   broadcastControlState(state);
 
-  const publisher = getPublisher();
-  if (!publisher) return;
+  const pool = getNotifyPool();
+  if (!pool) return;
 
   try {
-    await publisher.publish(CONTROL_STATE_CHANNEL, JSON.stringify(state));
+    await pool.query("SELECT pg_notify($1, $2)", [
+      CONTROL_STATE_CHANNEL,
+      String(state.version),
+    ]);
   } catch (error) {
-    console.error("Failed to publish control state", error);
+    console.error("Failed to publish control state notification", error);
   }
 }
 
 export async function ensureControlStateSubscription() {
-  const subscriber = getSubscriber();
-  if (!subscriber) return;
+  if (globalForControlPubSub.controlListenStarted) return;
 
-  // The "ready" handler covers connect and reconnect; this call covers the case
-  // where the client was already ready before this connection asked for it.
-  if (subscriber.status === "ready") {
-    await subscriber.subscribe(CONTROL_STATE_CHANNEL);
+  const connectionString = resolveDirectDatabaseUrl();
+  if (!connectionString) return;
+
+  globalForControlPubSub.controlListenStarted = true;
+
+  try {
+    await startListener(connectionString);
+  } catch (error) {
+    // Pub/sub is an optimization over the durable database state. A listener
+    // failure must never tear down /api/ws and trigger a browser request storm.
+    console.error(
+      "Failed to start the control-state listener. Cross-instance updates are " +
+        "temporarily disabled; LISTEN/NOTIFY requires a direct Postgres URL.",
+      error,
+    );
+    const client = globalForControlPubSub.controlListenClient;
+    if (client) scheduleReconnect(client);
+    else globalForControlPubSub.controlListenStarted = false;
   }
 }

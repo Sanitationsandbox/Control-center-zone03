@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["ioredis", "ws"],
+  serverExternalPackages: ["ws"],
   images: {
     remotePatterns: [
       {

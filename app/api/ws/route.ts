@@ -44,11 +44,24 @@ export async function GET() {
     ws.on("close", () => unregisterControlClient(ws));
     ws.on("error", () => unregisterControlClient(ws));
 
-    await ensureControlStateSubscription();
+    try {
+      await ensureControlStateSubscription();
 
-    sendControlMessage(ws, {
-      type: "INITIAL_STATE",
-      state: await loadControlState(),
-    });
+      sendControlMessage(ws, {
+        type: "INITIAL_STATE",
+        state: await loadControlState(),
+      });
+    } catch (error) {
+      // Database failure is fatal to this connection, but the client retains
+      // exponential backoff until a connection has remained healthy. A broken
+      // deployment therefore cannot become an Edge Request storm.
+      console.error("Failed to initialize control WebSocket", error);
+      sendControlMessage(ws, {
+        type: "ERROR",
+        message: "Control state is temporarily unavailable",
+      });
+      unregisterControlClient(ws);
+      ws.close(1011, "Control state unavailable");
+    }
   });
 }

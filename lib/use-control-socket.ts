@@ -9,7 +9,9 @@ type SocketStatus = "connecting" | "connected" | "disconnected";
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_TIMEOUT_MS = 15_000;
 const DEV_FALLBACK_INTERVAL_MS = 1_000;
-const MAX_RECONNECT_DELAY_MS = 10_000;
+const HEALTHY_CONNECTION_MS = 20_000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
+const RECONNECT_JITTER_RATIO = 0.25;
 const ENABLE_DEV_HTTP_FALLBACK = process.env.NODE_ENV === "development";
 const LOCAL_CONTROL_CHANNEL = "rubenius-control-state";
 
@@ -56,6 +58,7 @@ export function useControlSocket() {
     let reconnectTimer: number | undefined;
     let heartbeatTimer: number | undefined;
     let fallbackTimer: number | undefined;
+    let healthyConnectionTimer: number | undefined;
     let attempt = 0;
     let pingId = 0;
     let initialStateInFlight = false;
@@ -103,6 +106,25 @@ export function useControlSocket() {
       fallbackTimer = undefined;
     }
 
+    function stopHealthyConnectionTimer() {
+      if (healthyConnectionTimer) window.clearTimeout(healthyConnectionTimer);
+      healthyConnectionTimer = undefined;
+    }
+
+    function markConnectionHealthy(socket: WebSocket) {
+      if (healthyConnectionTimer) return;
+
+      // A successful HTTP upgrade is not enough to reset retry pressure: a
+      // broken server can open and immediately close forever. Require a valid
+      // state message and sustained health before returning to a 1s retry.
+      healthyConnectionTimer = window.setTimeout(() => {
+        healthyConnectionTimer = undefined;
+        if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
+          attempt = 0;
+        }
+      }, HEALTHY_CONNECTION_MS);
+    }
+
     function startHeartbeat(socket: WebSocket) {
       stopHeartbeat();
       lastPongAt = Date.now();
@@ -131,7 +153,6 @@ export function useControlSocket() {
       socketRef.current = socket;
 
       socket.addEventListener("open", () => {
-        attempt = 0;
         setStatus("connected");
         startHeartbeat(socket);
         socket.send(JSON.stringify({ type: "SYNC" }));
@@ -155,6 +176,7 @@ export function useControlSocket() {
             message.type === "CONTROL_STATE_CHANGED"
           ) {
             applyState(message.state);
+            markConnectionHealthy(socket);
           }
         } catch {
           // Ignore malformed WebSocket messages.
@@ -163,12 +185,15 @@ export function useControlSocket() {
 
       socket.addEventListener("close", () => {
         stopHeartbeat();
+        stopHealthyConnectionTimer();
         if (cancelled) return;
 
         setStatus("disconnected");
         setLatency(null);
-        const delay = Math.min(1000 * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
-        attempt += 1;
+        const baseDelay = Math.min(1000 * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+        const jitter = Math.round(baseDelay * RECONNECT_JITTER_RATIO * Math.random());
+        const delay = baseDelay + jitter;
+        attempt = Math.min(attempt + 1, 10);
         reconnectTimer = window.setTimeout(connect, delay);
       });
 
@@ -208,6 +233,7 @@ export function useControlSocket() {
       cancelled = true;
       stopHeartbeat();
       stopFallback();
+      stopHealthyConnectionTimer();
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       socketRef.current?.close();
     };

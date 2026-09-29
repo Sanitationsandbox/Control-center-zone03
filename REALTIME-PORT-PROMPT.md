@@ -22,7 +22,7 @@ Read these files there before writing anything. They are the spec:
 - `lib/pdf-control.ts` — shared state shape (`PdfRemoteState`, includes `version`)
 - `lib/control-state.ts` — Prisma reads/writes, monotonic version, command validation
 - `lib/control-events.ts` — message types, in-process client registry, broadcast
-- `lib/control-pubsub.ts` — ioredis publish/subscribe fan-out across instances
+- `lib/control-pubsub.ts` — Postgres LISTEN/NOTIFY fan-out across instances
 - `app/api/ws/route.ts` — the WebSocket route
 - `app/api/pdf-control/route.ts` — GET state / POST command
 - `lib/use-control-socket.ts` — browser hook
@@ -47,9 +47,9 @@ your training data. Per `AGENTS.md`, read the relevant guide under
    `INITIAL_STATE`, `STATE_SYNC`, `CONTROL_STATE_CHANGED`, `PONG`, `ERROR` from the
    server; `SYNC` and `PING` from the client. **Every state message carries the
    complete state object** — never a partial or a delta.
-3. **Redis pub/sub** (`lib/control-pubsub.ts`). Use `ioredis`, not `@upstash/redis`:
-   a subscription needs a long-lived connection, which the HTTP-based client cannot
-   hold. Publish after a successful database write; subscribe inside the WS route.
+3. **Postgres pub/sub** (`lib/control-pubsub.ts`). Publish version-only notifications
+   with `pg_notify`; hold a direct session connection for `LISTEN`, reload the full
+   Prisma state on receipt, and broadcast it to sockets attached to that instance.
 4. **WebSocket route** (`app/api/ws/route.ts`). Use
    `experimental_upgradeWebSocket` from `@vercel/functions`. On connect send
    `INITIAL_STATE`; answer `SYNC` with `STATE_SYNC` and `PING` with `PONG`.
@@ -77,15 +77,12 @@ expensive part of this task; the plumbing is easy.
    `SELECT last_value, is_called` and normalise the not-yet-called case to zero.
 2. **Bump the version and snapshot the state in the same transaction**, so the
    version always describes exactly the state shipped alongside it.
-3. **Resubscribe to Redis on `"ready"`**, which fires on the initial connect and
-   after every reconnect. Do not gate subscription behind a module-level boolean
-   that only a new client connection can reset — a Redis blip then freezes every
-   already-connected wall permanently, with sockets still reporting `connected`.
-4. **Fail loudly when `REDIS_URL` is missing in production.** A silent no-op
-   fan-out means a command reaches only the walls on the instance that handled the
-   POST, with no error anywhere. Throw **lazily at first use**, not at module
-   scope: a module-scope throw also fails `next build`, which collects page data
-   for every route handler.
+3. **Reconnect the Postgres listener internally.** Do not wait for a new browser
+   socket to restart `LISTEN`; an error or ended session must schedule capped
+   exponential reconnects so already-connected walls recover automatically.
+4. **Never let pub/sub initialization terminate the WebSocket.** Log direct-
+   connection failures loudly and retry them server-side. A thrown initialization
+   error closes every browser socket and can create an Edge Request retry storm.
 5. **Set `maxDuration` on the WS route.** Connections are bound to invocation
    lifetime. 300 is valid on every Vercel plan; 800 needs Pro/Enterprise with
    Fluid Compute. Reconnect is a normal, continuous event, not an error path.
@@ -107,8 +104,8 @@ expensive part of this task; the plumbing is easy.
 
 - **No polling fallback.** This was considered and rejected. The socket is the only
   channel. Do not add a timer that refetches state when the socket is down.
-- Do not change the durable source of truth. Prisma stays authoritative; Redis
-  only fans out change notifications.
+- Do not change the durable source of truth. Prisma stays authoritative; Postgres
+  notifications only fan out versioned change signals.
 
 ## Known consequence, accept it
 
@@ -130,13 +127,14 @@ Starting point: `<one of: still polling on a timer | already has a WebSocket lay
    existing control API route(s), the preview and operator surfaces, and the Prisma
    schema. Report what you found and how it differs from the reference before you
    start editing.
-3. Install what's missing: `npm install @vercel/functions ws ioredis` and
-   `npm install -D @types/ws`. Add `serverExternalPackages: ["ioredis", "ws"]` to
-   `next.config.ts`.
+3. Install what's missing: `npm install @vercel/functions ws pg` and
+   `npm install -D @types/ws`. Keep `ws` server-external; Next.js already treats
+   `pg` as a built-in server external package.
 4. Implement the seven architecture points above, avoiding all ten listed bugs.
-5. Add a `.env.example` documenting `DATABASE_URL`, `REDIS_URL` and any other
-   required vars. If `.gitignore` has a blanket `.env*`, add `!.env.example` or the
-   file is useless.
+5. Add a `.env.example` documenting `DATABASE_URL`, `DIRECT_DATABASE_URL` and any
+   other required vars. `LISTEN` needs a direct connection, not a transaction-mode
+   pooler. If `.gitignore` has a blanket `.env*`, add `!.env.example` or the file
+   is useless.
 6. Delete any component left unreferenced by the migration rather than leaving it
    to rot.
 7. Verify: `npm run lint`, `npx tsc --noEmit`, `npm run build`. Report pre-existing

@@ -1,11 +1,38 @@
 "use client";
 
 import Link from "next/link";
-import { useControlSocket } from "@/lib/use-control-socket";
+import { useEffect, useState } from "react";
+import type { PdfRemoteState } from "@/lib/pdf-control";
+
+type LoadStatus = "loading" | "loaded" | "offline";
 
 export function HomeStatus() {
-  const { state: systemState, status, latency } = useControlSocket();
-  const isConnected = status === "connected";
+  const [systemState, setSystemState] = useState<PdfRemoteState | null>(null);
+  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadState() {
+      try {
+        const response = await fetch("/api/pdf-control", { cache: "no-store" });
+        if (!response.ok) throw new Error("State request failed");
+        const state = (await response.json()) as PdfRemoteState;
+        if (cancelled) return;
+        setSystemState(state);
+        setLoadStatus("loaded");
+      } catch {
+        if (!cancelled) setLoadStatus("offline");
+      }
+    }
+
+    void loadState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isLoaded = loadStatus === "loaded";
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-12">
@@ -13,31 +40,29 @@ export function HomeStatus() {
       <div className="flex flex-wrap items-center justify-between gap-4 p-4 md:p-6 bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-2xl shadow-xl">
         <div className="flex items-center gap-3">
           <span className="relative flex h-3.5 w-3.5">
-            {isConnected ? (
-              <>
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
-              </>
-            ) : (
-              <>
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-rose-500"></span>
-              </>
-            )}
+            <span
+              className={`relative inline-flex rounded-full h-3.5 w-3.5 ${
+                isLoaded ? "bg-emerald-500" : "bg-rose-500"
+              }`}
+            />
           </span>
           <div>
             <p className="text-xs text-slate-400 font-mono uppercase tracking-wider">System Status</p>
             <p className="text-sm font-semibold text-white">
-              {isConnected ? "CONNECTED & ONLINE" : "SYSTEM OFFLINE"}
+              {loadStatus === "loading"
+                ? "LOADING STATE"
+                : isLoaded
+                  ? "STATE LOADED"
+                  : "STATE UNAVAILABLE"}
             </p>
           </div>
         </div>
 
         <div className="flex gap-8">
           <div>
-            <p className="text-xs text-slate-400 font-mono uppercase tracking-wider">Sync Latency</p>
+            <p className="text-xs text-slate-400 font-mono uppercase tracking-wider">Realtime Status</p>
             <p className="text-sm font-semibold font-mono text-cyan-400">
-              {isConnected && latency !== null ? `${latency} ms` : "--"}
+              Controller screens only
             </p>
           </div>
           <div>

@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
 import { prisma } from "@/lib/prisma";
-import { uploadToCloudinary, uploadBufferToCloudinary, deleteFromCloudinary } from "@/lib/cloudinary";
+import { deleteFromCloudinary } from "@/lib/cloudinary";
 import { AssetKind } from "@/lib/generated/prisma/enums";
 
 export const dynamic = "force-dynamic";
-
-const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 
 function kindFromMime(mime: string): AssetKind {
   if (mime.startsWith("image/")) return AssetKind.IMAGE;
@@ -33,58 +30,60 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const formData = await request.formData();
-    const files = formData.getAll("files").filter((f): f is File => f instanceof File);
+    const body = await request.json().catch(() => ({}));
+    const {
+      name,
+      url,
+      mimeType,
+      size,
+      width,
+      height,
+      pageCount,
+      publicId,
+      checksum,
+    } = body as {
+      name?: string;
+      url?: string;
+      mimeType?: string;
+      size?: number;
+      width?: number | null;
+      height?: number | null;
+      pageCount?: number | null;
+      publicId?: string;
+      checksum?: string;
+    };
 
-    if (files.length === 0) {
-      return NextResponse.json({ error: "No files provided" }, { status: 400 });
+    if (!name || !url || !mimeType || typeof size !== "number" || !publicId || !checksum) {
+      return NextResponse.json({ error: "Missing required asset metadata" }, { status: 400 });
     }
 
-    const createdAssets = [];
-
-    for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
-
-      const existing = await prisma.asset.findUnique({ where: { checksum } });
-      if (existing) {
-        createdAssets.push(existing);
-        continue;
-      }
-
-      const mimeType = file.type || "application/octet-stream";
-      const kind = kindFromMime(mimeType);
-      const uploadOptions = { folder: "control-center", resource_type: "auto" as const };
-
-      const result =
-        buffer.length > LARGE_FILE_THRESHOLD
-          ? await uploadBufferToCloudinary(buffer, uploadOptions)
-          : await uploadToCloudinary(`data:${mimeType};base64,${buffer.toString("base64")}`, uploadOptions);
-
-      const asset = await prisma.asset.create({
-        data: {
-          name: file.name,
-          filename: result.public_id,
-          url: result.secure_url,
-          mimeType,
-          kind,
-          size: result.bytes ?? file.size,
-          width: result.width ?? null,
-          height: result.height ?? null,
-          pageCount: kind === AssetKind.PDF ? result.pages ?? null : null,
-          storage: "CLOUDINARY",
-          publicId: result.public_id,
-          checksum,
-        },
-      });
-
-      createdAssets.push(asset);
+    const existing = await prisma.asset.findUnique({ where: { checksum } });
+    if (existing) {
+      return NextResponse.json({ success: true, asset: existing, duplicate: true });
     }
 
-    return NextResponse.json({ success: true, assets: createdAssets });
+    const kind = kindFromMime(mimeType);
+    const asset = await prisma.asset.create({
+      data: {
+        name,
+        filename: publicId,
+        url,
+        mimeType,
+        kind,
+        size,
+        width: width ?? null,
+        height: height ?? null,
+        pageCount: kind === AssetKind.PDF ? pageCount ?? null : null,
+        storage: "CLOUDINARY",
+        publicId,
+        checksum,
+      },
+    });
+
+    return NextResponse.json({ success: true, asset });
   } catch (error) {
     console.error("POST upload error:", error);
-    return NextResponse.json({ error: "Failed to upload files" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to register uploaded file" }, { status: 500 });
   }
 }
 

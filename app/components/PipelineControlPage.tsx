@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   broadcastLocalControlState,
   useControlSocket,
@@ -47,7 +47,7 @@ export function PipelineControlPage({
   title,
   subtitle,
 }: PipelineControlPageProps) {
-  const { state, status } = useControlSocket();
+  const { state } = useControlSocket();
   const [isSending, setIsSending] = useState(false);
   const [optimisticPage, setOptimisticPage] = useState<{
     page: number;
@@ -62,12 +62,6 @@ export function PipelineControlPage({
       ? optimisticPage.page
       : remotePage;
   const isActive = state?.activePdfId === pdfId;
-
-  const statusLabel = useMemo(() => {
-    if (status === "connected") return "Connected";
-    if (status === "connecting") return "Connecting";
-    return "Reconnecting";
-  }, [status]);
 
   useEffect(() => {
     async function activateModule() {
@@ -151,16 +145,6 @@ export function PipelineControlPage({
         >
           &larr; BACK
         </a>
-      </div>
-
-      <div className="absolute top-6 right-6 z-10 flex items-center gap-2 rounded-full border border-teal-500/20 bg-slate-950/50 px-3 py-1.5 text-[10px] font-mono uppercase tracking-widest text-slate-400">
-        <span
-          className={`h-2 w-2 rounded-full ${
-            status === "connected" ? "bg-teal-400" : "bg-amber-400"
-          }`}
-          aria-hidden="true"
-        />
-        {statusLabel}
       </div>
 
       <div className="relative z-10 flex flex-col items-center max-w-4xl px-6 text-center space-y-6">

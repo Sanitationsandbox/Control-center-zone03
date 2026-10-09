@@ -82,6 +82,11 @@ export default function AdminPage() {
   const [draggedSlide, setDraggedSlide] = useState<{ pipeline: "crt" | "mtu" | "stp"; index: number } | null>(null);
   const [dragOverSlideIndex, setDragOverSlideIndex] = useState<number | null>(null);
 
+  // Helper to show toast message
+  const showToast = (message: string, type: "success" | "error") => {
+    setToast({ message, type });
+  };
+
   const crtPipeline = pipelines.find((p) => p.key === "CRT");
   const mtuPipeline = pipelines.find((p) => p.key === "MTU");
   const stpPipeline = pipelines.find((p) => p.key === "STP");
@@ -130,7 +135,7 @@ export default function AdminPage() {
     setDraggedSlide({ pipeline, index });
   };
 
-  const handleSlideDragOver = (e: any, index: number) => {
+  const handleSlideDragOver = (e: DragEvent<HTMLDivElement>, index: number) => {
     e.preventDefault();
     setDragOverSlideIndex(index);
   };
@@ -221,7 +226,7 @@ export default function AdminPage() {
       if (!res.ok) throw new Error("Failed to load assets");
       const data = (await res.json()) as Asset[];
       setAssets(data);
-    } catch (err) {
+    } catch {
       showToast("Error loading assets", "error");
     } finally {
       setLoading(false);
@@ -241,14 +246,11 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
-    void fetchAssets();
-    void fetchPipelines();
+    queueMicrotask(() => {
+      void fetchAssets();
+      void fetchPipelines();
+    });
   }, []);
-
-  // Helper to show toast message
-  const showToast = (message: string, type: "success" | "error") => {
-    setToast({ message, type });
-  };
 
   useEffect(() => {
     if (toast) {
@@ -265,16 +267,6 @@ export default function AdminPage() {
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
-  };
-
-  // Copy URL/path to clipboard
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast("Copied path to clipboard!", "success");
-    } catch {
-      showToast("Failed to copy path", "error");
-    }
   };
 
   // Delete an asset
@@ -337,33 +329,92 @@ export default function AdminPage() {
     setUploadFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const checksumFor = async (file: File) => {
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  };
+
+  const resourceTypeFor = (mimeType: string) => {
+    if (mimeType.startsWith("image/")) return "image";
+    if (mimeType.startsWith("video/")) return "video";
+    return "raw";
+  };
+
   // Execute Upload
   const handleUploadSubmit = async () => {
     if (uploadFiles.length === 0) return;
     setIsUploading(true);
+    let hasError = false;
 
-    const formData = new FormData();
-    uploadFiles.forEach((uf) => {
-      formData.append("files", uf.file);
-    });
+    for (let i = 0; i < uploadFiles.length; i++) {
+      const uf = uploadFiles[i];
 
-    // Mark all as uploading
-    setUploadFiles((prev) =>
-      prev.map((uf) => ({ ...uf, status: "uploading" }))
-    );
-
-    try {
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) throw new Error("Upload failed");
-
-      // Mark all as success
       setUploadFiles((prev) =>
-        prev.map((uf) => ({ ...uf, status: "success" }))
+        prev.map((item, idx) => (idx === i ? { ...item, status: "uploading" } : item))
       );
+
+      try {
+        const signRes = await fetch("/api/upload/sign", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder: "control-center" }),
+        });
+        if (!signRes.ok) throw new Error("Failed to get upload signature");
+
+        const signData = await signRes.json();
+        const mimeType = uf.file.type || "application/octet-stream";
+        const checksum = await checksumFor(uf.file);
+        const cloudinaryForm = new FormData();
+        cloudinaryForm.append("file", uf.file);
+        cloudinaryForm.append("api_key", signData.apiKey);
+        cloudinaryForm.append("timestamp", String(signData.timestamp));
+        cloudinaryForm.append("signature", signData.signature);
+        cloudinaryForm.append("folder", signData.folder);
+
+        const uploadRes = await fetch(
+          `https://api.cloudinary.com/v1_1/${signData.cloudName}/${resourceTypeFor(mimeType)}/upload`,
+          {
+            method: "POST",
+            body: cloudinaryForm,
+          },
+        );
+        if (!uploadRes.ok) throw new Error("Cloudinary upload failed");
+
+        const uploadData = await uploadRes.json();
+        const registerRes = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: uf.file.name,
+            url: uploadData.secure_url,
+            mimeType,
+            size: uploadData.bytes ?? uf.file.size,
+            width: uploadData.width ?? null,
+            height: uploadData.height ?? null,
+            pageCount: uploadData.pages ?? null,
+            publicId: uploadData.public_id,
+            checksum,
+          }),
+        });
+        if (!registerRes.ok) throw new Error("Database registration failed");
+
+        setUploadFiles((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, status: "success" } : item))
+        );
+      } catch (error) {
+        console.error("Upload error for file:", uf.file.name, error);
+        hasError = true;
+        setUploadFiles((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, status: "error" } : item))
+        );
+      }
+    }
+
+    if (hasError) {
+      showToast("Some uploads failed. Please try again.", "error");
+    } else {
       showToast(`Successfully uploaded ${uploadFiles.length} file(s)`, "success");
 
       // Delay closing modal slightly so the user sees the success state
@@ -372,21 +423,15 @@ export default function AdminPage() {
         setUploadFiles([]);
         void fetchAssets();
       }, 800);
-    } catch {
-      setUploadFiles((prev) =>
-        prev.map((uf) => ({ ...uf, status: "error" }))
-      );
-      showToast("Upload failed. Please try again.", "error");
-    } finally {
-      setIsUploading(false);
     }
+
+    setIsUploading(false);
   };
 
   // Compute stat aggregates
   const totalSize = assets.reduce((acc, curr) => acc + curr.size, 0);
   const imagesCount = assets.filter((a) => a.kind === "IMAGE").length;
   const pdfsCount = assets.filter((a) => a.kind === "PDF").length;
-  const otherCount = assets.length - imagesCount - pdfsCount;
 
   return (
     <main className="relative min-h-screen w-full flex flex-col items-center p-6 md:p-12 lg:p-20 overflow-hidden bg-[#070b14] text-slate-100 font-sans">
